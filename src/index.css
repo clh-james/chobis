@@ -1,0 +1,46 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Mobile App Feel */
+html {
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: contain;
+}
+
+body {
+  -webkit-text-size-adjust: 100%;
+}
+
+/* Touch-friendly buttons */
+button, select, input {
+  min-height: 44px;
+}
+
+/* Hide scrollbar but keep functionality */
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Print Receipt Styling */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .print\:block, .print\:block * {
+    visibility: visible;
+  }
+  .print\:block {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 20px;
+    background: white;
+  }
+}

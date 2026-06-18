@@ -1,0 +1,5 @@
+{
+  "css.lint.unknownAtRules": "ignore",
+  "typescript.validate.enable": false,
+  "javascript.validate.enable": false
+}
