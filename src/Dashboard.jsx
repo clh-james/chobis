@@ -30,7 +30,7 @@ export default function Dashboard() {
       .gte('created_at', todayStart)
       .lte('created_at', todayEnd);
     
-    const totalRevenue = salesData?.reduce((sum, sale) => sum + sale.total_amount, 0) || 0;
+    const totalRevenue = salesData?.reduce((sum, sale) => sum + (sale.total_amount || 0), 0) || 0;
     const totalSales = salesData?.length || 0;
 
     // 2. Appointments Today
@@ -52,7 +52,7 @@ export default function Dashboard() {
       appointmentsToday: appointmentsData?.length || 0,
       totalRevenueToday: totalRevenue.toFixed(2),
       lowStockProducts: lowStockData || [],
-      upcomingAppointments: appointmentsData?.slice(0, 5) || [] // Show next 5
+      upcomingAppointments: appointmentsData?.slice(0, 5) || []
     });
     setLoading(false);
   };
@@ -60,39 +60,43 @@ export default function Dashboard() {
   if (loading) return <div className="flex items-center justify-center h-screen text-pink-600">Loading Dashboard...</div>;
 
   return (
-    <div className="min-h-screen bg-[#fdf8f6] text-gray-800 font-sans">
+    <div className="min-h-screen bg-[#fdf8f6] text-gray-800 font-sans pb-20 md:pb-0">
       {/* Elegant Header */}
       <div className="bg-white shadow-sm border-b border-pink-100 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex justify-between items-center">
-          <img src="/logo.png" alt="Chloe House of Beauty" className="h-12 md:h-16" />
+        <div className="max-w-7xl mx-auto px-6 py-6 flex justify-between items-center">
+          <img 
+            src="/logo.png" 
+            alt="Chloe House of Beauty" 
+            className="h-20 md:h-24 w-auto object-contain" 
+          />
           <div className="text-right hidden md:block">
-            <p className="text-xs text-gray-400 uppercase tracking-widest">Welcome back</p>
-            <p className="font-serif text-xl text-pink-800">Chloe House of Beauty</p>
+            <p className="text-xs text-gray-400 uppercase tracking-widest mb-1">Welcome back</p>
+            <p className="font-serif text-2xl text-pink-800 font-medium">Chloe House of Beauty</p>
           </div>
         </div>
       </div>
 
       <div className="max-w-7xl mx-auto p-6 md:p-8 space-y-8">
         
-        {/* Key Metrics Grid - Glassmorphism Style */}
+        {/* Key Metrics Grid */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
           <MetricCard 
             title="Today's Revenue" 
             value={`₱${stats.totalRevenueToday}`} 
             icon="💰" 
-            color="from-pink-500 to-rose-600" 
+            color="bg-gradient-to-br from-pink-500 to-rose-600" 
           />
           <MetricCard 
             title="Appointments" 
             value={stats.appointmentsToday} 
-            icon="📅" 
-            color="from-purple-500 to-indigo-600" 
+            icon="" 
+            color="bg-gradient-to-br from-purple-500 to-indigo-600" 
           />
           <MetricCard 
             title="Total Sales" 
             value={stats.totalSalesToday} 
             icon="🛍️" 
-            color="from-amber-400 to-orange-500" 
+            color="bg-gradient-to-br from-amber-400 to-orange-500" 
           />
         </div>
 
@@ -111,14 +115,14 @@ export default function Dashboard() {
               <div className="space-y-4">
                 {stats.upcomingAppointments.map((appt) => (
                   <div key={appt.id} className="flex items-center p-4 bg-gray-50 rounded-xl border border-gray-100 hover:border-pink-200 transition-all">
-                    <div className="w-12 h-12 rounded-full bg-pink-100 flex items-center justify-center text-pink-600 font-bold mr-4">
+                    <div className="w-12 h-12 rounded-full bg-pink-100 flex items-center justify-center text-pink-600 font-bold mr-4 shrink-0">
                       {new Date(appt.appointment_date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})}
                     </div>
-                    <div className="flex-1">
-                      <p className="font-bold text-gray-800">{appt.clients?.name}</p>
-                      <p className="text-sm text-gray-500">{appt.services?.name} • {appt.staff_name}</p>
+                    <div className="flex-1 min-w-0">
+                      <p className="font-bold text-gray-800 truncate">{appt.clients?.name}</p>
+                      <p className="text-sm text-gray-500 truncate">{appt.services?.name} • {appt.staff_name}</p>
                     </div>
-                    <div className="text-xs font-medium px-3 py-1 bg-green-100 text-green-700 rounded-full">
+                    <div className="text-xs font-medium px-3 py-1 bg-green-100 text-green-700 rounded-full ml-2 capitalize">
                       {appt.status}
                     </div>
                   </div>
@@ -158,7 +162,7 @@ export default function Dashboard() {
 // Reusable Metric Card Component
 function MetricCard({ title, value, icon, color }) {
   return (
-    <div className={`relative overflow-hidden rounded-2xl p-6 text-white shadow-lg bg-gradient-to-br ${color}`}>
+    <div className={`relative overflow-hidden rounded-2xl p-6 text-white shadow-lg ${color}`}>
       <div className="absolute top-0 right-0 -mt-4 -mr-4 w-24 h-24 bg-white opacity-10 rounded-full blur-xl"></div>
       <p className="text-sm opacity-90 font-medium mb-1">{title}</p>
       <div className="flex items-end justify-between">
