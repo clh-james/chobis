@@ -1,21 +1,22 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './supabaseClient';
+import { logAudit, ACTIONS, CATEGORIES } from './utils/auditLogger';
 
 export default function ReceptionistPanel() {
-  const [activeTab, setActiveTab] = useState('schedule'); // schedule, walkin, receipts
-  const [appointments, setAppointments] = useState([]);
-  const [clients, setClients] = useState([]);
+  const [todayAppointments, setTodayAppointments] = useState([]);
   const [services, setServices] = useState([]);
   const [loading, setLoading] = useState(true);
-
+  
   // Walk-in Form State
-  const [walkinForm, setWalkinForm] = useState({
-    client_id: '', new_client_name: '', new_client_phone: '', 
-    service_id: '', staff_name: 'Chloe', notes: ''
+  const [showWalkInForm, setShowWalkInForm] = useState(false);
+  const [walkInData, setWalkInData] = useState({
+    client_name: '',
+    client_phone: '',
+    service_id: '',
+    therapist_name: '',
+    appointment_time: '',
+    notes: ''
   });
-
-  // Receipt Preview State
-  const [selectedSale, setSelectedSale] = useState(null);
 
   useEffect(() => {
     fetchData();
@@ -25,144 +26,172 @@ export default function ReceptionistPanel() {
     setLoading(true);
     const today = new Date().toISOString().split('T')[0];
     
-    const { data: appts } = await supabase
+    const { data: apptData } = await supabase
       .from('appointments')
-      .select('*, clients(name), services(name)')
-      .gte('appointment_date', `${today}T00:00:00`)
-      .order('appointment_date', { ascending: true });
-
-    const { data: cli } = await supabase.from('clients').select('id, name').order('name');
-    const { data: srv } = await supabase.from('services').select('id, name, price').order('name');
-
-    setAppointments(appts || []);
-    setClients(cli || []);
-    setServices(srv || []);
+      .select('*')
+      .eq('appointment_date', today)
+      .order('appointment_time', { ascending: true });
+      
+    const { data: servData } = await supabase.from('services').select('id, name, price, duration_minutes').order('name');
+    
+    setTodayAppointments(apptData || []);
+    setServices(servData || []);
     setLoading(false);
   };
 
-  // Handle Check-In / Status Update
-  const updateStatus = async (id, status) => {
-    await supabase.from('appointments').update({ status }).eq('id', id);
-    fetchData();
-  };
-
-  // Handle Walk-in Booking
-  const handleWalkIn = async (e) => {
+  const handleWalkInBooking = async (e) => {
     e.preventDefault();
-    let clientId = walkinForm.client_id;
+    const selectedService = services.find(s => s.id === walkInData.service_id);
+    const today = new Date().toISOString().split('T')[0];
 
-    // Create new client if needed
-    if (!clientId && walkinForm.new_client_name) {
-      const { data: newCli } = await supabase
-        .from('clients')
-        .insert([{ name: walkinForm.new_client_name, phone: walkinForm.new_client_phone }])
-        .select()
-        .single();
-      clientId = newCli?.id;
+    const { data: newAppt, error } = await supabase.from('appointments').insert([{
+      ...walkInData,
+      appointment_date: today,
+      status: 'Checked In',
+      price: selectedService?.price || 0,
+      service_name: selectedService?.name || 'Walk-in Service',
+      duration_minutes: selectedService?.duration_minutes || 60
+    }]).select().single();
+
+    if (error) {
+      alert('Error creating walk-in: ' + error.message);
+    } else {
+      // ✅ AUDIT LOG: Appointment Created (Walk-in)
+      await logAudit({
+        action: ACTIONS.APPOINTMENTS.CREATED,
+        category: CATEGORIES.APPOINTMENTS,
+        entityType: 'appointment',
+        entityId: newAppt.id,
+        details: {
+          type: 'WALK_IN',
+          client: walkInData.client_name,
+          phone: walkInData.client_phone,
+          service: selectedService?.name,
+          therapist: walkInData.therapist_name,
+          time: walkInData.appointment_time
+        }
+      });
+
+      alert('Walk-in booked successfully!');
+      setShowWalkInForm(false);
+      setWalkInData({ client_name: '', client_phone: '', service_id: '', therapist_name: '', appointment_time: '', notes: '' });
+      fetchData();
     }
-
-    if (!clientId) return alert('Please select or create a client');
-
-    const selectedService = services.find(s => s.id === walkinForm.service_id);
-    const now = new Date();
-
-    await supabase.from('appointments').insert([{
-      client_id: clientId,
-      service_id: walkinForm.service_id,
-      appointment_date: now.toISOString(),
-      staff_name: walkinForm.staff_name,
-      duration_minutes: 60, // Default for walk-ins
-      status: 'checked_in',
-      notes: `Walk-in: ${walkinForm.notes}`
-    }]);
-
-    alert('Walk-in checked in successfully!');
-    setWalkinForm({ client_id: '', new_client_name: '', new_client_phone: '', service_id: '', staff_name: 'Chloe', notes: '' });
-    fetchData();
-    setActiveTab('schedule');
   };
 
-  // Mock Receipt Data (In production, link sales to appointments)
-  const generateMockReceipt = (appt) => {
-    setSelectedSale({
-      id: `REC-${Math.floor(Math.random() * 10000)}`,
-      date: new Date().toLocaleString(),
-      client: appt.clients?.name || 'Walk-in Client',
-      items: [{ name: appt.services?.name || 'Service', qty: 1, price: appt.services?.price || 0 }],
-      total: appt.services?.price || 0,
-      staff: appt.staff_name
-    });
-    // Trigger print after state updates
-    setTimeout(() => window.print(), 100);
+  const handleStatusChange = async (apptId, newStatus) => {
+    const { error } = await supabase.from('appointments').update({ status: newStatus }).eq('id', apptId);
+    
+    if (!error) {
+      const action = newStatus === 'Completed' ? ACTIONS.APPOINTMENTS.COMPLETED : ACTIONS.APPOINTMENTS.STATUS_CHANGED;
+      await logAudit({
+        action,
+        category: CATEGORIES.APPOINTMENTS,
+        entityType: 'appointment',
+        entityId: apptId,
+        details: { new_status: newStatus }
+      });
+      fetchData();
+    } else {
+      alert('Failed to update status: ' + error.message);
+    }
   };
 
-  if (loading) return <div className="p-8 text-center text-pink-600">Loading Front Desk...</div>;
+  if (loading) return <div className="flex h-screen items-center justify-center text-pink-600 dark:text-pink-400">Loading Reception...</div>;
 
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-6">
-      {/* Header & Tabs */}
-      <div className="flex flex-col md:flex-row justify-between items-center bg-white p-4 rounded-xl shadow-sm border border-pink-100">
-        <h1 className="text-2xl font-serif text-pink-800">Front Desk Operations</h1>
-        <div className="flex bg-gray-100 p-1 rounded-lg mt-4 md:mt-0">
-          {[
-            { id: 'schedule', label: 'Today\'s Schedule' },
-            { id: 'walkin', label: 'Quick Walk-In' },
-            { id: 'receipts', label: 'Receipts' }
-          ].map(tab => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`px-4 py-2 rounded-md text-sm font-medium transition-all ${
-                activeTab === tab.id ? 'bg-white text-pink-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+    <div className="space-y-6 animate-in fade-in duration-500 pb-20 md:pb-0">
+      
+      {/* HEADER */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-serif text-pink-800 dark:text-pink-300">Reception Desk</h1>
+          <p className="text-gray-500 dark:text-gray-400 mt-1">
+            Today's Schedule • {new Date().toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })}
+          </p>
         </div>
+        <button 
+          onClick={() => setShowWalkInForm(true)}
+          className="px-6 py-3 bg-gradient-to-r from-pink-600 to-rose-600 text-white rounded-xl font-bold hover:shadow-lg hover:scale-[1.02] active:scale-[0.98] transition-all flex items-center gap-2"
+        >
+           Walk-In Booking
+        </button>
       </div>
 
-      {/* TAB 1: TODAY'S SCHEDULE */}
-      {activeTab === 'schedule' && (
-        <div className="bg-white rounded-xl shadow-sm border border-pink-100 overflow-hidden">
-          <table className="w-full text-left">
-            <thead className="bg-pink-50 text-pink-800">
+      {/* STATS BAR */}
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+        {[
+          { label: 'Total Booked', value: todayAppointments.length, color: 'bg-blue-50 dark:bg-blue-900/20 text-blue-700 dark:text-blue-300 border-blue-200 dark:border-blue-800' },
+          { label: 'Checked In', value: todayAppointments.filter(a => a.status === 'Checked In').length, color: 'bg-green-50 dark:bg-green-900/20 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800' },
+          { label: 'Completed', value: todayAppointments.filter(a => a.status === 'Completed').length, color: 'bg-purple-50 dark:bg-purple-900/20 text-purple-700 dark:text-purple-300 border-purple-200 dark:border-purple-800' },
+          { label: 'Cancelled', value: todayAppointments.filter(a => a.status === 'Cancelled').length, color: 'bg-red-50 dark:bg-red-900/20 text-red-700 dark:text-red-300 border-red-200 dark:border-red-800' }
+        ].map((stat, idx) => (
+          <div key={idx} className={`p-4 rounded-xl border ${stat.color}`}>
+            <p className="text-xs font-bold uppercase tracking-wider opacity-80">{stat.label}</p>
+            <p className="text-3xl font-bold mt-1">{stat.value}</p>
+          </div>
+        ))}
+      </div>
+
+      {/* TODAY'S SCHEDULE TABLE */}
+      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-pink-100 dark:border-gray-700 overflow-hidden">
+        <div className="p-4 border-b border-pink-100 dark:border-gray-700 bg-pink-50/50 dark:bg-gray-700/30">
+          <h2 className="font-serif text-lg text-pink-800 dark:text-pink-300 font-bold">Appointment Timeline</h2>
+        </div>
+        
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-gray-50 dark:bg-gray-700/50 text-gray-500 dark:text-gray-400 uppercase text-xs font-bold">
               <tr>
-                <th className="p-4 font-semibold">Time</th>
-                <th className="p-4 font-semibold">Client</th>
-                <th className="p-4 font-semibold">Service</th>
-                <th className="p-4 font-semibold">Staff</th>
-                <th className="p-4 font-semibold">Status</th>
-                <th className="p-4 font-semibold">Actions</th>
+                <th className="p-4 w-24">Time</th>
+                <th className="p-4">Client</th>
+                <th className="p-4 min-w-[180px]">Service</th>
+                <th className="p-4 w-32">Therapist</th>
+                <th className="p-4 w-32">Status</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-pink-50">
-              {appointments.length === 0 ? (
-                <tr><td colSpan="6" className="p-8 text-center text-gray-400 italic">No appointments for today.</td></tr>
+            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+              {todayAppointments.length === 0 ? (
+                <tr>
+                  <td colSpan="5" className="p-12 text-center text-gray-400 dark:text-gray-500">
+                    <div className="text-4xl mb-3 opacity-30"></div>
+                    <p className="font-medium">No appointments scheduled for today</p>
+                    <p className="text-xs mt-1">Use the Walk-In button above to add clients</p>
+                  </td>
+                </tr>
               ) : (
-                appointments.map(appt => (
-                  <tr key={appt.id} className="hover:bg-pink-50/30">
-                    <td className="p-4 font-bold text-pink-700">
-                      {new Date(appt.appointment_date).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
-                    </td>
-                    <td className="p-4 font-medium">{appt.clients?.name}</td>
-                    <td className="p-4">{appt.services?.name}</td>
-                    <td className="p-4 text-sm text-gray-500">{appt.staff_name}</td>
+                todayAppointments.map(appt => (
+                  <tr key={appt.id} className="hover:bg-pink-50/50 dark:hover:bg-gray-700/30 transition-colors">
+                    <td className="p-4 font-bold text-gray-800 dark:text-gray-200 whitespace-nowrap">{appt.appointment_time}</td>
                     <td className="p-4">
-                      <span className={`px-2 py-1 rounded-full text-xs font-bold capitalize ${
-                        appt.status === 'scheduled' ? 'bg-blue-100 text-blue-700' :
-                        appt.status === 'checked_in' ? 'bg-yellow-100 text-yellow-700' :
-                        'bg-green-100 text-green-700'
-                      }`}>{appt.status.replace('_', ' ')}</span>
+                      <div className="font-medium text-gray-800 dark:text-gray-200">{appt.client_name}</div>
+                      <div className="text-xs text-gray-500 dark:text-gray-400">{appt.client_phone}</div>
                     </td>
-                    <td className="p-4 flex gap-2">
-                      {appt.status === 'scheduled' && (
-                        <button onClick={() => updateStatus(appt.id, 'checked_in')} className="px-3 py-1 bg-yellow-500 text-white rounded text-xs font-bold hover:bg-yellow-600">Check In</button>
+                    <td className="p-4">
+                      <div className="text-pink-700 dark:text-pink-300 font-medium">{appt.service_name}</div>
+                      {appt.total_package_sessions > 1 && (
+                        <span className="text-[10px] bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 px-2 py-0.5 rounded-full mt-1 inline-block">
+                          Session {appt.package_session_number}/{appt.total_package_sessions}
+                        </span>
                       )}
-                      {appt.status === 'checked_in' && (
-                        <button onClick={() => updateStatus(appt.id, 'completed')} className="px-3 py-1 bg-green-500 text-white rounded text-xs font-bold hover:bg-green-600">Complete</button>
-                      )}
-                      <button onClick={() => generateMockReceipt(appt)} className="px-3 py-1 bg-gray-100 text-gray-700 rounded text-xs font-bold hover:bg-gray-200 border border-gray-200">Print Receipt</button>
+                    </td>
+                    <td className="p-4 text-gray-600 dark:text-gray-400">{appt.therapist_name || '-'}</td>
+                    <td className="p-4">
+                      <select 
+                        value={appt.status}
+                        onChange={(e) => handleStatusChange(appt.id, e.target.value)}
+                        className={`text-xs font-bold px-3 py-1.5 rounded-full border-0 cursor-pointer outline-none ${
+                          appt.status === 'Completed' ? 'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300' :
+                          appt.status === 'Cancelled' ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' :
+                          appt.status === 'Checked In' ? 'bg-blue-100 text-blue-700 dark:bg-blue-900/30 dark:text-blue-300' :
+                          'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300'
+                        }`}
+                      >
+                        <option>Scheduled</option>
+                        <option>Checked In</option>
+                        <option>Completed</option>
+                        <option>Cancelled</option>
+                      </select>
                     </td>
                   </tr>
                 ))
@@ -170,130 +199,64 @@ export default function ReceptionistPanel() {
             </tbody>
           </table>
         </div>
-      )}
-
-      {/* TAB 2: QUICK WALK-IN */}
-      {/* Mobile Card View (Visible < md) */}
-<div className="md:hidden space-y-3">
-  {appointments.map(appt => (
-    <div key={appt.id} className="bg-white p-4 rounded-xl shadow-sm border border-pink-100 flex justify-between items-center">
-      <div>
-        <p className="font-bold text-pink-700 text-lg">
-          {new Date(appt.appointment_date).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'})}
-        </p>
-        <p className="font-medium text-gray-800">{appt.clients?.name}</p>
-        <p className="text-sm text-gray-500">{appt.services?.name} • {appt.staff_name}</p>
       </div>
-      <div className="flex flex-col gap-2">
-        {appt.status === 'scheduled' && (
-          <button onClick={() => updateStatus(appt.id, 'checked_in')} 
-            className="px-4 py-2 bg-yellow-500 text-white rounded-lg text-sm font-bold active:scale-95 transition">
-            Check In
-          </button>
-        )}
-        <button onClick={() => generateMockReceipt(appt)} 
-          className="px-4 py-2 bg-gray-100 text-gray-700 rounded-lg text-sm font-bold border border-gray-200 active:scale-95 transition">
-          Receipt
-        </button>
-      </div>
-    </div>
-  ))}
-</div>
 
-{/* Desktop Table View (Visible >= md) */}
-<div className="hidden md:block overflow-x-auto">
-  {/* ... existing table code ... */}
-</div>
-      {activeTab === 'walkin' && (
-        <div className="bg-white rounded-xl shadow-sm border border-pink-100 p-6 max-w-2xl mx-auto">
-          <h2 className="text-xl font-serif text-pink-800 mb-6">Register Walk-in Client</h2>
-          <form onSubmit={handleWalkIn} className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Existing Client</label>
-                <select className="w-full p-3 border border-pink-200 rounded-lg"
-                  value={walkinForm.client_id} onChange={e => setWalkinForm({...walkinForm, client_id: e.target.value})}>
-                  <option value="">-- Select Client --</option>
-                  {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">OR New Client Name</label>
-                <input placeholder="Full Name" className="w-full p-3 border border-pink-200 rounded-lg"
-                  value={walkinForm.new_client_name} onChange={e => setWalkinForm({...walkinForm, new_client_name: e.target.value})} />
-              </div>
+      {/* WALK-IN MODAL */}
+      {showWalkInForm && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-2xl max-w-lg w-full p-6 space-y-4 animate-in zoom-in-95 duration-200">
+            <div className="flex justify-between items-center">
+              <h3 className="text-xl font-serif text-pink-800 dark:text-pink-300 font-bold">Walk-In Booking</h3>
+              <button onClick={() => setShowWalkInForm(false)} className="text-gray-400 dark:text-gray-500 hover:text-gray-600 dark:hover:text-gray-300 text-2xl leading-none">&times;</button>
             </div>
             
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">New Client Phone</label>
-                <input placeholder="09XX XXX XXXX" className="w-full p-3 border border-pink-200 rounded-lg"
-                  value={walkinForm.new_client_phone} onChange={e => setWalkinForm({...walkinForm, new_client_phone: e.target.value})} />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Service Required</label>
-                <select required className="w-full p-3 border border-pink-200 rounded-lg"
-                  value={walkinForm.service_id} onChange={e => setWalkinForm({...walkinForm, service_id: e.target.value})}>
-                  <option value="">Select Service</option>
-                  {services.map(s => <option key={s.id} value={s.id}>{s.name} - ₱{s.price}</option>)}
-                </select>
-              </div>
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Assigned Staff</label>
-                <input className="w-full p-3 border border-pink-200 rounded-lg"
-                  value={walkinForm.staff_name} onChange={e => setWalkinForm({...walkinForm, staff_name: e.target.value})} />
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Notes</label>
-                <input placeholder="Allergies, preferences..." className="w-full p-3 border border-pink-200 rounded-lg"
-                  value={walkinForm.notes} onChange={e => setWalkinForm({...walkinForm, notes: e.target.value})} />
-              </div>
-            </div>
-
-            <button type="submit" className="w-full bg-pink-600 text-white py-3 rounded-lg font-bold hover:bg-pink-700 transition mt-4">
-              Check In Walk-in Now
-            </button>
-          </form>
-        </div>
-      )}
-
-      {/* PRINT RECEIPT TEMPLATE (Hidden unless printing) */}
-      {selectedSale && (
-        <div className="hidden print:block fixed inset-0 bg-white z-50 p-8">
-          <div className="max-w-[80mm] mx-auto text-center font-mono text-sm">
-            <img src="/logo.png" alt="Logo" className="h-16 mx-auto mb-4 opacity-80" />
-            <h2 className="text-lg font-bold uppercase tracking-wider mb-1">Chloe House of Beauty</h2>
-            <p className="text-xs text-gray-500 mb-4">Gluta Spa & Wellness Center</p>
-            
-            <div className="border-b border-dashed border-gray-300 pb-2 mb-2 text-left">
-              <p>Date: {selectedSale.date}</p>
-              <p>Receipt #: {selectedSale.id}</p>
-              <p>Client: {selectedSale.client}</p>
-              <p>Staff: {selectedSale.staff}</p>
-            </div>
-
-            <div className="text-left mb-4">
-              {selectedSale.items.map((item, i) => (
-                <div key={i} className="flex justify-between py-1">
-                  <span>{item.qty}x {item.name}</span>
-                  <span>₱{item.price.toFixed(2)}</span>
+            <form onSubmit={handleWalkInBooking} className="space-y-3">
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Client Name *</label>
+                  <input required type="text" value={walkInData.client_name} onChange={e => setWalkInData({...walkInData, client_name: e.target.value})} className="w-full px-3 py-2.5 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 focus:ring-2 focus:ring-pink-400 outline-none" />
                 </div>
-              ))}
-            </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Phone *</label>
+                  <input required type="tel" value={walkInData.client_phone} onChange={e => setWalkInData({...walkInData, client_phone: e.target.value})} className="w-full px-3 py-2.5 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 focus:ring-2 focus:ring-pink-400 outline-none" />
+                </div>
+              </div>
 
-            <div className="border-t border-dashed border-gray-300 pt-2 mb-4 flex justify-between font-bold text-base">
-              <span>TOTAL</span>
-              <span>₱{selectedSale.total.toFixed(2)}</span>
-            </div>
+              <div>
+                <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Service *</label>
+                <select required value={walkInData.service_id} onChange={e => setWalkInData({...walkInData, service_id: e.target.value})} className="w-full px-3 py-2.5 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 focus:ring-2 focus:ring-pink-400 outline-none">
+                  <option value="">Select a service...</option>
+                  {services.map(s => (
+                    <option key={s.id} value={s.id}>{s.name} - ₱{s.price}</option>
+                  ))}
+                </select>
+              </div>
 
-            <p className="text-xs text-gray-400 mt-8">Thank you for choosing us!</p>
-            <p className="text-xs text-gray-400">www.chloehouseofbeauty.com</p>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Therapist</label>
+                  <input type="text" value={walkInData.therapist_name} onChange={e => setWalkInData({...walkInData, therapist_name: e.target.value})} className="w-full px-3 py-2.5 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 focus:ring-2 focus:ring-pink-400 outline-none" />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Time *</label>
+                  <input required type="time" value={walkInData.appointment_time} onChange={e => setWalkInData({...walkInData, appointment_time: e.target.value})} className="w-full px-3 py-2.5 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 focus:ring-2 focus:ring-pink-400 outline-none" />
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Notes</label>
+                <textarea rows="2" value={walkInData.notes} onChange={e => setWalkInData({...walkInData, notes: e.target.value})} className="w-full px-3 py-2.5 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200 focus:ring-2 focus:ring-pink-400 outline-none resize-none" placeholder="Special requests, allergies, etc." />
+              </div>
+
+              <div className="flex gap-3 pt-2">
+                <button type="button" onClick={() => setShowWalkInForm(false)} className="flex-1 py-3 text-sm font-bold text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 rounded-xl hover:bg-gray-200 dark:hover:bg-gray-600 transition">Cancel</button>
+                <button type="submit" className="flex-1 py-3 text-sm font-bold text-white bg-gradient-to-r from-pink-600 to-rose-600 rounded-xl hover:shadow-lg transition">Book Walk-In</button>
+              </div>
+            </form>
           </div>
         </div>
       )}
+
     </div>
   );
 }

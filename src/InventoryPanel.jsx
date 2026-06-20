@@ -1,218 +1,225 @@
 import React, { useState, useEffect } from 'react';
 import { supabase } from './supabaseClient';
+import { logAudit, ACTIONS, CATEGORIES } from './utils/auditLogger';
 
 export default function InventoryPanel() {
-  const [activeTab, setActiveTab] = useState('stock'); // stock, receive, suppliers
   const [products, setProducts] = useState([]);
-  const [suppliers, setSuppliers] = useState([]);
   const [loading, setLoading] = useState(true);
-
-  // Form States
-  const [newSupplier, setNewSupplier] = useState({ name: '', contact_person: '', phone: '', email: '' });
-  const [receiveForm, setReceiveForm] = useState({ product_id: '', quantity: '', supplier_id: '', cost_price: '', notes: '' });
+  const [searchTerm, setSearchTerm] = useState('');
+  const [adjustModal, setAdjustModal] = useState(null); // { id, name, currentStock }
+  const [adjustQty, setAdjustQty] = useState(1);
+  const [adjustType, setAdjustType] = useState('increase');
+  const [adjustReason, setAdjustReason] = useState('');
 
   useEffect(() => {
-    fetchData();
+    fetchProducts();
   }, []);
 
-  const fetchData = async () => {
+  const fetchProducts = async () => {
     setLoading(true);
-    const { data: prodData } = await supabase.from('products').select('*, suppliers(name)').order('name');
-    const { data: suppData } = await supabase.from('suppliers').select('*').order('name');
-    
-    setProducts(prodData || []);
-    setSuppliers(suppData || []);
+    const { data } = await supabase.from('products').select('*').order('name');
+    setProducts(data || []);
     setLoading(false);
   };
 
-  // Handle Adding Supplier
-  const handleAddSupplier = async (e) => {
-    e.preventDefault();
-    const { error } = await supabase.from('suppliers').insert([newSupplier]);
-    if (!error) {
-      alert('Supplier added!');
-      setNewSupplier({ name: '', contact_person: '', phone: '', email: '' });
-      fetchData();
-    } else alert(error.message);
-  };
+  const handleStockAdjustment = async () => {
+    if (!adjustModal || adjustQty <= 0) return;
 
-  // Handle Receiving Stock
-  const handleReceiveStock = async (e) => {
-    e.preventDefault();
-    const qty = parseInt(receiveForm.quantity);
-    if (!qty || qty <= 0) return alert('Invalid quantity');
+    const product = products.find(p => p.id === adjustModal.id);
+    if (!product) return;
 
-    // 1. Update Product Stock & Cost Price
-    const { error: updateError } = await supabase
+    const newStock = adjustType === 'increase' 
+      ? product.stock_quantity + adjustQty 
+      : Math.max(0, product.stock_quantity - adjustQty);
+
+    const { error } = await supabase
       .from('products')
-      .update({ 
-        stock_quantity: products.find(p => p.id === receiveForm.product_id).stock_quantity + qty,
-        cost_price: parseFloat(receiveForm.cost_price) || 0 
-      })
-      .eq('id', receiveForm.product_id);
+      .update({ stock_quantity: newStock })
+      .eq('id', adjustModal.id);
 
-    if (updateError) return alert(updateError.message);
+    if (error) {
+      alert('Failed to update stock: ' + error.message);
+    } else {
+      // ✅ AUDIT LOG: Stock Increased OR Decreased
+      const action = adjustType === 'increase' 
+        ? ACTIONS.INVENTORY.STOCK_INCREASED 
+        : ACTIONS.INVENTORY.STOCK_DECREASED;
 
-    // 2. Log the Movement
-    await supabase.from('stock_movements').insert([{
-      product_id: receiveForm.product_id,
-      movement_type: 'in',
-      quantity: qty,
-      notes: receiveForm.notes || `Received from ${suppliers.find(s => s.id === receiveForm.supplier_id)?.name}`,
-      created_by: (await supabase.auth.getUser()).data.user?.id
-    }]);
+      await logAudit({
+        action,
+        category: CATEGORIES.INVENTORY,
+        entityType: 'product',
+        entityId: adjustModal.id,
+        details: {
+          product_name: adjustModal.name,
+          previous_stock: product.stock_quantity,
+          new_stock: newStock,
+          adjustment_quantity: adjustQty,
+          reason: adjustReason || 'Manual adjustment'
+        }
+      });
 
-    alert('Stock received successfully!');
-    setReceiveForm({ product_id: '', quantity: '', supplier_id: '', cost_price: '', notes: '' });
-    fetchData();
+      alert(`Stock ${adjustType}d successfully!`);
+      setAdjustModal(null);
+      setAdjustQty(1);
+      setAdjustReason('');
+      fetchProducts();
+    }
   };
 
-  if (loading) return <div className="p-8 text-center text-pink-600">Loading Inventory...</div>;
+  const filteredProducts = products.filter(p => 
+    p.name.toLowerCase().includes(searchTerm.toLowerCase())
+  );
+
+  if (loading) return <div className="flex h-screen items-center justify-center text-pink-600 dark:text-pink-400">Loading Inventory...</div>;
 
   return (
-    <div className="max-w-6xl mx-auto p-6 space-y-6">
-      {/* Header & Tabs */}
-      <div className="flex flex-col md:flex-row justify-between items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-pink-100">
-        <h1 className="text-2xl font-serif text-pink-800">Inventory Management</h1>
-        <div className="flex bg-gray-100 p-1 rounded-lg">
-          {['stock', 'receive', 'suppliers'].map(tab => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab)}
-              className={`px-4 py-2 rounded-md text-sm font-medium capitalize transition-all ${
-                activeTab === tab ? 'bg-white text-pink-700 shadow-sm' : 'text-gray-500 hover:text-gray-700'
-              }`}
-            >
-              {tab === 'receive' ? 'Receive Stock' : tab}
-            </button>
-          ))}
+    <div className="space-y-6 animate-in fade-in duration-500 pb-20 md:pb-0">
+      
+      {/* HEADER */}
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div>
+          <h1 className="text-3xl font-serif text-pink-800 dark:text-pink-300">Inventory Management</h1>
+          <p className="text-gray-500 dark:text-gray-400 mt-1">Track and manage product stock levels</p>
         </div>
+        <input 
+          type="text" 
+          placeholder="Search products..." 
+          value={searchTerm}
+          onChange={(e) => setSearchTerm(e.target.value)}
+          className="px-4 py-2 border border-pink-200 dark:border-gray-700 rounded-lg bg-white dark:bg-gray-800 text-gray-800 dark:text-gray-200 focus:ring-2 focus:ring-pink-400 outline-none w-full md:w-64"
+        />
       </div>
 
-      {/* TAB 1: STOCK LEVELS */}
-      {activeTab === 'stock' && (
-        <div className="bg-white rounded-xl shadow-sm border border-pink-100 overflow-hidden">
-          <table className="w-full text-left">
-            <thead className="bg-pink-50 text-pink-800">
+      {/* PRODUCTS TABLE */}
+      <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-sm border border-pink-100 dark:border-gray-700 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="bg-pink-50 dark:bg-gray-700/50 text-pink-800 dark:text-pink-300 uppercase text-xs font-bold tracking-wider">
               <tr>
-                <th className="p-4 font-semibold">Product</th>
-                <th className="p-4 font-semibold">SKU</th>
-                <th className="p-4 font-semibold">Stock</th>
-                <th className="p-4 font-semibold">Sell Price</th>
-                <th className="p-4 font-semibold">Cost Price</th>
-                <th className="p-4 font-semibold">Supplier</th>
+                <th className="p-4">Product Name</th>
+                <th className="p-4 w-32">Price</th>
+                <th className="p-4 w-32">Stock</th>
+                <th className="p-4 w-40">Status</th>
+                <th className="p-4 w-40">Actions</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-pink-50">
-              {products.map(p => (
-                <tr key={p.id} className={`hover:bg-pink-50/30 ${p.stock_quantity < 5 ? 'bg-red-50' : ''}`}>
-                  <td className="p-4 font-medium">{p.name}</td>
-                  <td className="p-4 text-gray-500 text-sm">{p.sku || '-'}</td>
-                  <td className="p-4">
-                    <span className={`px-2 py-1 rounded-full text-xs font-bold ${
-                      p.stock_quantity < 5 ? 'bg-red-100 text-red-700' : 'bg-green-100 text-green-700'
-                    }`}>
-                      {p.stock_quantity}
-                    </span>
+            <tbody className="divide-y divide-gray-100 dark:divide-gray-700">
+              {filteredProducts.length === 0 ? (
+                <tr>
+                  <td colSpan="5" className="p-8 text-center text-gray-400 dark:text-gray-500 italic">
+                    No products found.
                   </td>
-                  <td className="p-4">₱{p.price?.toFixed(2)}</td>
-                  <td className="p-4 text-gray-500">₱{p.cost_price?.toFixed(2)}</td>
-                  <td className="p-4 text-sm text-gray-500">{p.suppliers?.name || '-'}</td>
                 </tr>
-              ))}
+              ) : (
+                filteredProducts.map(product => (
+                  <tr key={product.id} className="hover:bg-pink-50/50 dark:hover:bg-gray-700/30 transition-colors">
+                    <td className="p-4 font-medium text-gray-800 dark:text-gray-200">{product.name}</td>
+                    <td className="p-4 text-gray-600 dark:text-gray-400">₱{product.price?.toLocaleString()}</td>
+                    <td className="p-4 font-bold text-gray-800 dark:text-gray-200">{product.stock_quantity}</td>
+                    <td className="p-4">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded-full text-xs font-bold ${
+                        product.stock_quantity === 0 ? 'bg-red-100 text-red-700 dark:bg-red-900/30 dark:text-red-300' :
+                        product.stock_quantity < 5 ? 'bg-yellow-100 text-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-300' :
+                        'bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-300'
+                      }`}>
+                        {product.stock_quantity === 0 ? 'Out of Stock' : 
+                         product.stock_quantity < 5 ? 'Low Stock' : 'In Stock'}
+                      </span>
+                    </td>
+                    <td className="p-4">
+                      <button 
+                        onClick={() => setAdjustModal({ id: product.id, name: product.name, currentStock: product.stock_quantity })}
+                        className="px-3 py-1.5 text-xs font-bold bg-pink-50 dark:bg-pink-900/20 text-pink-700 dark:text-pink-300 rounded-lg hover:bg-pink-100 dark:hover:bg-pink-900/30 transition"
+                      >
+                        Adjust Stock
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
             </tbody>
           </table>
         </div>
-      )}
+      </div>
 
-      {/* TAB 2: RECEIVE STOCK */}
-      {activeTab === 'receive' && (
-        <div className="bg-white rounded-xl shadow-sm border border-pink-100 p-6 max-w-2xl">
-          <h2 className="text-xl font-serif text-pink-800 mb-6">Log New Stock Arrival</h2>
-          <form onSubmit={handleReceiveStock} className="space-y-4">
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Product</label>
-                <select required className="w-full p-3 border border-pink-200 rounded-lg" 
-                  value={receiveForm.product_id} onChange={e => setReceiveForm({...receiveForm, product_id: e.target.value})}>
-                  <option value="">Select Product</option>
-                  {products.map(p => <option key={p.id} value={p.id}>{p.name} (Current: {p.stock_quantity})</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Quantity Received</label>
-                <input type="number" min="1" required className="w-full p-3 border border-pink-200 rounded-lg"
-                  value={receiveForm.quantity} onChange={e => setReceiveForm({...receiveForm, quantity: e.target.value})} />
-              </div>
-            </div>
+      {/* STOCK ADJUSTMENT MODAL */}
+      {adjustModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white dark:bg-gray-800 rounded-2xl shadow-xl max-w-md w-full p-6 space-y-4">
+            <h3 className="text-xl font-serif text-pink-800 dark:text-pink-300">Adjust Stock: {adjustModal.name}</h3>
+            <p className="text-sm text-gray-500 dark:text-gray-400">Current Stock: <span className="font-bold text-gray-800 dark:text-gray-200">{adjustModal.currentStock}</span></p>
             
-            <div className="grid grid-cols-2 gap-4">
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Supplier</label>
-                <select className="w-full p-3 border border-pink-200 rounded-lg"
-                  value={receiveForm.supplier_id} onChange={e => setReceiveForm({...receiveForm, supplier_id: e.target.value})}>
-                  <option value="">Select Supplier (Optional)</option>
-                  {suppliers.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
-                </select>
-              </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Unit Cost Price (₱)</label>
-                <input type="number" step="0.01" className="w-full p-3 border border-pink-200 rounded-lg"
-                  value={receiveForm.cost_price} onChange={e => setReceiveForm({...receiveForm, cost_price: e.target.value})} />
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1">Notes / Batch #</label>
-              <textarea rows="2" className="w-full p-3 border border-pink-200 rounded-lg"
-                value={receiveForm.notes} onChange={e => setReceiveForm({...receiveForm, notes: e.target.value})}></textarea>
-            </div>
-
-            <button type="submit" className="w-full bg-pink-600 text-white py-3 rounded-lg font-bold hover:bg-pink-700 transition">
-              Update Inventory
-            </button>
-          </form>
-        </div>
-      )}
-
-      {/* TAB 3: SUPPLIERS */}
-      {activeTab === 'suppliers' && (
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-          {/* Add Supplier Form */}
-          <div className="bg-white rounded-xl shadow-sm border border-pink-100 p-6 h-fit">
-            <h2 className="text-xl font-serif text-pink-800 mb-4">Add New Supplier</h2>
-            <form onSubmit={handleAddSupplier} className="space-y-3">
-              <input placeholder="Company Name *" required className="w-full p-3 border border-pink-200 rounded-lg"
-                value={newSupplier.name} onChange={e => setNewSupplier({...newSupplier, name: e.target.value})} />
-              <input placeholder="Contact Person" className="w-full p-3 border border-pink-200 rounded-lg"
-                value={newSupplier.contact_person} onChange={e => setNewSupplier({...newSupplier, contact_person: e.target.value})} />
-              <input placeholder="Phone Number" className="w-full p-3 border border-pink-200 rounded-lg"
-                value={newSupplier.phone} onChange={e => setNewSupplier({...newSupplier, phone: e.target.value})} />
-              <input placeholder="Email Address" type="email" className="w-full p-3 border border-pink-200 rounded-lg"
-                value={newSupplier.email} onChange={e => setNewSupplier({...newSupplier, email: e.target.value})} />
-              <button type="submit" className="w-full bg-pink-600 text-white py-2 rounded-lg font-bold hover:bg-pink-700">Save Supplier</button>
-            </form>
-          </div>
-
-          {/* Supplier List */}
-          <div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-pink-100 p-6">
-            <h2 className="text-xl font-serif text-pink-800 mb-4">Supplier Directory</h2>
             <div className="space-y-3">
-              {suppliers.length === 0 ? <p className="text-gray-400 italic">No suppliers added yet.</p> : 
-                suppliers.map(s => (
-                  <div key={s.id} className="flex justify-between items-center p-4 border border-pink-50 rounded-lg hover:border-pink-200">
-                    <div>
-                      <p className="font-bold text-gray-800">{s.name}</p>
-                      <p className="text-sm text-gray-500">{s.contact_person} • {s.phone}</p>
-                    </div>
-                    <a href={`mailto:${s.email}`} className="text-pink-600 text-sm font-medium hover:underline">Email</a>
-                  </div>
-                ))
-              }
+              <div>
+                <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Adjustment Type</label>
+                <div className="flex gap-2">
+                  <button 
+                    onClick={() => setAdjustType('increase')}
+                    className={`flex-1 py-2 text-sm font-bold rounded-lg transition ${
+                      adjustType === 'increase' 
+                        ? 'bg-green-600 text-white' 
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
+                    }`}
+                  >
+                    📦 Increase
+                  </button>
+                  <button 
+                    onClick={() => setAdjustType('decrease')}
+                    className={`flex-1 py-2 text-sm font-bold rounded-lg transition ${
+                      adjustType === 'decrease' 
+                        ? 'bg-red-600 text-white' 
+                        : 'bg-gray-100 dark:bg-gray-700 text-gray-600 dark:text-gray-300'
+                    }`}
+                  >
+                    📉 Decrease
+                  </button>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Quantity</label>
+                <input 
+                  type="number" 
+                  min="1" 
+                  value={adjustQty}
+                  onChange={(e) => setAdjustQty(parseInt(e.target.value) || 1)}
+                  className="w-full px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-gray-600 dark:text-gray-400 mb-1">Reason (Optional)</label>
+                <input 
+                  type="text" 
+                  placeholder="e.g., New shipment, Spoilage, etc."
+                  value={adjustReason}
+                  onChange={(e) => setAdjustReason(e.target.value)}
+                  className="w-full px-3 py-2 border border-gray-200 dark:border-gray-600 rounded-lg bg-white dark:bg-gray-700 text-gray-800 dark:text-gray-200"
+                />
+              </div>
+            </div>
+
+            <div className="flex gap-2 pt-2">
+              <button 
+                onClick={() => setAdjustModal(null)}
+                className="flex-1 py-2 text-sm font-bold text-gray-600 dark:text-gray-400 bg-gray-100 dark:bg-gray-700 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 transition"
+              >
+                Cancel
+              </button>
+              <button 
+                onClick={handleStockAdjustment}
+                className={`flex-1 py-2 text-sm font-bold text-white rounded-lg transition ${
+                  adjustType === 'increase' ? 'bg-green-600 hover:bg-green-700' : 'bg-red-600 hover:bg-red-700'
+                }`}
+              >
+                Confirm {adjustType === 'increase' ? 'Restock' : 'Reduce'}
+              </button>
             </div>
           </div>
         </div>
       )}
+
     </div>
   );
 }
